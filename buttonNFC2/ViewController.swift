@@ -10,6 +10,7 @@ import CoreNFC
 
 class ViewController: UIViewController, NFCTagReaderSessionDelegate {
     
+   
     private var tagSession: NFCTagReaderSession!
     
     func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {
@@ -100,8 +101,45 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                         
                         // First block has game len and checksum
                         
-                        let gameImage = [UInt8] ("This is an example of a game block that should be 256 bytes long. This is an example of a game block that should be 256 bytes long. This is an example of a game block that should be 256 bytes long.".utf8)
-                        
+                        let gameImage = [UInt8] ("""
+                            ’Twas brillig, and the slithy toves
+                                  Did gyre and gimble in the wabe:
+                            All mimsy were the borogoves,
+                                  And the mome raths outgrabe.
+
+                            “Beware the Jabberwock, my son!
+                                  The jaws that bite, the claws that catch!
+                            Beware the Jubjub bird, and shun
+                                  The frumious Bandersnatch!”
+
+                            He took his vorpal sword in hand;
+                                  Long time the manxome foe he sought—
+                            So rested he by the Tumtum tree
+                                  And stood awhile in thought.
+
+                            And, as in uffish thought he stood,
+                                  The Jabberwock, with eyes of flame,
+                            Came whiffling through the tulgey wood,
+                                  And burbled as it came!
+
+                            One, two! One, two! And through and through
+                                  The vorpal blade went snicker-snack!
+                            He left it dead, and with its head
+                                  He went galumphing back.
+
+                            “And hast thou slain the Jabberwock?
+                                  Come to my arms, my beamish boy!
+                            O frabjous day! Callooh! Callay!”
+                                  He chortled in his joy.
+
+                            ’Twas brillig, and the slithy toves
+                                  Did gyre and gimble in the wabe:
+                            All mimsy were the borogoves,
+                                  And the mome raths outgrabe.
+                        """.utf8 )
+                            
+                        let blockSize = 128         // Number of bytes in a game image block
+                      
                         // Next compute the game header block
                         
                         // find the length of the game
@@ -154,16 +192,13 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                         
                             func sendNextBlock( gameImageBlance: [UInt8] ) {
                          
-                                let blockBytes = Array(gameImageBlance.prefix(256))
+                                let blockBytes = Array(gameImageBlance.prefix( blockSize))
                                 
                                 print( "sending a block len:",blockBytes.count)
                                 
                                 iso15693Tag.customCommand(requestFlags: RequestFlag(rawValue: 0x02), customCommandCode: 0xaa, customRequestParameters: Data(_: makeWriteMessageParam( block: blockBytes ) )) {  (response: Data, error: Error?) in
                                     
                                     print("In send_block message callback")
-                                    
-                                    // ONly try once for now TODO: fix this
-                                    return
                                     
                                     // Check if RF command failed becuase interface was busy
                                     if let nfcReaderError = error as? NFCReaderError {
@@ -213,9 +248,11 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                         return;
                                     }
                                     
-                                    if blockBytes.count == 256 {
+                                    if blockBytes.count == blockSize {
                                         
-                                        let nextGameImageBalance =  gameImageBlance[256... ]
+                                        // Last block was full, so maybe more
+                                        
+                                        let nextGameImageBalance =  gameImageBlance[ blockSize... ]
                                         if (nextGameImageBalance.count > 0 ) {
                                             print( "sending next block...")
                                             sendNextBlock(gameImageBlance: Array( nextGameImageBalance ) )
