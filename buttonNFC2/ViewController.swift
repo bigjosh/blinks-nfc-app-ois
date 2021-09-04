@@ -73,7 +73,7 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                 print("waiting for blink to power up, enable mailbox, and send high score block")
              
                 // The blink controls this number. TODO: Actually figure it out, probably *much* shorter than this
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10), execute: {
                                     
                     print("get highscore block")
 
@@ -162,8 +162,53 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                     
                                     print("In send_block message callback")
                                     
+                                    // ONly try once for now TODO: fix this
+                                    return
+                                    
+                                    // Check if RF command failed becuase interface was busy
+                                    if let nfcReaderError = error as? NFCReaderError {
+                                        
+                                        // It appears that the Apple NFC API only offers the response code back to us in the error string dictionary
+                                        // How ugly.
+                                        
+                                        func extractIso15693ErrorCode(error :NFCReaderError) -> Int {
+                                            
+                                            let iso15693ErrorDictionary = error.errorUserInfo
+                                            
+                                            if iso15693ErrorDictionary["ISO15693TagResponseErrorCode"] != nil {
+                                                let responseCode = iso15693ErrorDictionary["ISO15693TagResponseErrorCode"] as! Int
+                                                return responseCode
+                                            }
+                                
+                                            return 0x00
+                                        }
+                                    
+                                        // Response code 0x0f means "chip is busy with i2c transaction. If we get this, then
+                                        // we should retry the transaction. Really no need to delay.
+                                        
+                                        let responseCode = extractIso15693ErrorCode(error: nfcReaderError )
+                                        if responseCode == 0x0f {
+                                            // Note here we are resending the same block again, rather than the next block
+                                            print("Chip busy, resend same block")
+                                            
+                                            // Wait for now just to prevent the output console from overflowing
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(7), execute: {
+                                                  
+                                                sendNextBlock(gameImageBlance: gameImageBlance)
+                                            
+                                            })
+                                            
+                                            // The new call will take over flow, so do not fall though
+                                            return
+                                            
+                                        }
+                                        
+                                    }
+                                    
                                     guard error == nil else {
                                         print("error sending block ")
+                                        print("type=",type(of: error! ))
+                                        print("Response:", error! )
                                         print(error!)
                                         return;
                                     }
@@ -172,18 +217,23 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                         
                                         let nextGameImageBalance =  gameImageBlance[256... ]
                                         if (nextGameImageBalance.count > 0 ) {
+                                            print( "sending next block...")
                                             sendNextBlock(gameImageBlance: Array( nextGameImageBalance ) )
-                                        } else {
-                                            print( "finished sending game")
+                                            // We are done
+                                            return
                                         }
+                                        
                                     }
+                                    print( "finished sending game")
+                                    return
                                     
                                     // If we get here then we are done sending the game!
                                 }
                                     
                             }
                             
-                            sendNextBlock(gameImageBlance: gameImage)
+                            // Send first block, which will kickstart the rest
+                             sendNextBlock(gameImageBlance: gameImage)
                         }
                     }
                 
