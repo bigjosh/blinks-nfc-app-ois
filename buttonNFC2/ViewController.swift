@@ -8,9 +8,20 @@
 import UIKit
 import CoreNFC
 
-class ViewController: UIViewController, NFCTagReaderSessionDelegate {
+enum BlinkNFCProtocol {
     
-   
+    // This cookie is at the begining of the gamestats block sent by a blink on connection.
+    static let blinkGameStatCookie = "bks1".utf8
+    
+    // Number of bytes in each consecutive block of game data.
+    // Choosen becuase apple customCOmmand does not seem to let us send the max of 256 bytes per packet, so mind as well
+    // send an exact FLASH block to make blink code simpler.
+    static let blockSize = 128         // Number of bytes in a game image block
+
+}
+
+class ViewController: UIViewController, NFCTagReaderSessionDelegate {
+       
     private var tagSession: NFCTagReaderSession!
     
     func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {
@@ -23,14 +34,13 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
     }
     
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
+        
         print("did detect NFC")
         
         if tags.count > 1 {
-            print("Wow! more than one Blink found.")
-            //tagSession.restartPolling()
+            session.invalidate( errorMessage:  "Too many blinks. Try just one.")
             return
         }
-        
         
         var iso15693Tag: NFCISO15693Tag!
         
@@ -40,66 +50,54 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
             break
             
         default:
-            print( "Tag not valid or not type5")
-            //session.restartPolling()
+            session.invalidate( errorMessage:  "Not a blink. Must be NFC type5 tag.")
             return
         }
 
+
         /* Begin Swift Async Callback Pyrimd of Doom */
+        /* sync/await would be more eligant here, but I don't know howw to enable them */
        
         session.connect(to: tags.first!) { (error: Error?) in
             guard error == nil else {
-                print("session connect error")
-                print(error!)
-                print("end session connect")
-                session.invalidate(errorMessage: "Connection error. Please try again.")
+                session.invalidate(errorMessage: "Error connecting to blink:"+error!.localizedDescription)
                 return
             }
-            print("session.connnect success")
-                    
             print( "sending GPO pulse")
             
             /* Send GPO pulse to wake blink */
             iso15693Tag.customCommand(requestFlags: RequestFlag(rawValue: 0x02), customCommandCode: 0xa9, customRequestParameters: Data(_: [0x80])) { (response: Data, error: Error?) in
                 print("in GPO send callback")
                 guard error == nil else {
-                    print("error in Send GPO")
-                    session.invalidate(errorMessage: "Could not send GPO command. Please try again."+error!.localizedDescription)
-                    print(error!)
-                    print(error!.localizedDescription)
-                    print("end error in custom command")
+                    session.invalidate(errorMessage: "Could not send GPO command:"+error!.localizedDescription)
                     return
                 }
 
                 print("waiting for blink to power up, enable mailbox, and send high score block")
              
                 // The blink controls this number. TODO: Actually figure it out, probably *much* shorter than this
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10), execute: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: {
                                     
-                    print("get highscore block")
+                    print("get gamestat block")
 
                     /* Read message command, starting at pointer 0, read 256 bytes (0 means read 256, any other value means n+1 bytes */
                     iso15693Tag.customCommand(requestFlags: RequestFlag(rawValue: 0x02), customCommandCode: 0xac, customRequestParameters: Data(_:[0x00,0x00])) { (response: Data, error: Error?) in
-                        print("Read message callback")
+                        print("Read gamestat callback")
                         guard error == nil else {
-                            print("start Read message error")
-                            print(error!)
-                            print("end read message error")
+                            session.invalidate( errorMessage:  "Error reading gamestat block from blink: " + error!.localizedDescription )
+                            print( error! )
                             return
                         }
-                        print("start read message response")
                         
-                        let message_string = String( bytes: response, encoding: .ascii)
-                        print("len:",response.count)
-                        print(message_string!)
+                        guard response.starts(with: BlinkNFCProtocol.blinkGameStatCookie ) else {
+                            session.invalidate( errorMessage:  "Blink magic cookie not found." )
+                            print("blink magic cookie not found")
+                            return
+                        }
                         
-                        print("end read message response")
+                        // let gameStatBlock = [UInt8](response)       // Convert to immutible byte array
+                        // TODO: pass the message string back to the app to be parsed and stored.
                         
-                        // TODO: check the block starts with "bks1" magic cookie. If not, tell user "not a blink"
-                        
-                        // OK, now the beef - send new game to blink as a series of 256 byte blocks
-                        
-                        // First block has game len and checksum
                         
                         let gameImage = [UInt8] ("""
                             ’Twas brillig, and the slithy toves
@@ -138,8 +136,16 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                   And the mome raths outgrabe.
                         """.utf8 )
                             
-                        let blockSize = 128         // Number of bytes in a game image block
                       
+                        if gameImage == nil {
+                            // No game to send, just wanted to update gamestats
+                            return
+                        }
+                        
+                        // OK, now the beef - send new game to blink as a series of 256 byte blocks
+                        
+                        // First block has game len and checksum
+                        
                         // Next compute the game header block
                         
                         // find the length of the game
@@ -166,10 +172,11 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                         
                         
                         print("game length:\(gameLength) crc: \(crc)")
-                                        
+                           
+                        // Protocol for header block is 2 byte game image len and 2 byte CRC
                         let headerBlockBytes = [UInt8(gameLength&0xFF), UInt8(gameLength/0x100), UInt8(crc&0xFF), UInt8(crc/0x100)]
                         
-                        // This creates a a byte array with len-1 as the leading byte as expected by the write message command
+                        // This creates a a byte array with len-1 as the leading byte as expected by the NFC write message command
                         func makeWriteMessageParam( block : [UInt8] ) -> [UInt8] {
                             return [ UInt8(block.count-1) ] + block
                         }
@@ -183,8 +190,8 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                             print("In send header block message callback")
                             
                             guard error == nil else {
-                                print("error sending header block ")
-                                print(error!)
+                                // Note that we do not check for busy here since the blink should be passively waiting for this header
+                                session.invalidate( errorMessage:  "Error sending header block:" + error!.localizedDescription )
                                 return;
                             }
                         
@@ -192,7 +199,8 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                         
                             func sendNextBlock( gameImageBlance: [UInt8] ) {
                          
-                                let blockBytes = Array(gameImageBlance.prefix( blockSize))
+                                // Peel off the next block
+                                let blockBytes = Array(gameImageBlance.prefix( BlinkNFCProtocol.blockSize ))
                                 
                                 print( "sending a block len:",blockBytes.count)
                                 
@@ -226,8 +234,8 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                             // Note here we are resending the same block again, rather than the next block
                                             print("Chip busy, resend same block")
                                             
-                                            // Wait for now just to prevent the output console from overflowing
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(7), execute: {
+                                            // Wait 1ms for now just to prevent the output console from overflowing
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1), execute: {
                                                   
                                                 sendNextBlock(gameImageBlance: gameImageBlance)
                                             
@@ -241,18 +249,15 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
                                     }
                                     
                                     guard error == nil else {
-                                        print("error sending block ")
-                                        print("type=",type(of: error! ))
-                                        print("Response:", error! )
-                                        print(error!)
+                                        session.invalidate( errorMessage:  "Error sending game block:" + error!.localizedDescription );
                                         return;
                                     }
                                     
-                                    if blockBytes.count == blockSize {
+                                    if blockBytes.count == BlinkNFCProtocol.blockSize {
                                         
                                         // Last block was full, so maybe more
                                         
-                                        let nextGameImageBalance =  gameImageBlance[ blockSize... ]
+                                        let nextGameImageBalance =  gameImageBlance[ BlinkNFCProtocol.blockSize... ]
                                         if (nextGameImageBalance.count > 0 ) {
                                             print( "sending next block...")
                                             sendNextBlock(gameImageBlance: Array( nextGameImageBalance ) )
@@ -305,61 +310,6 @@ class ViewController: UIViewController, NFCTagReaderSessionDelegate {
         tagSession?.begin()
     }
     
-    func installGame( gameImage: [UInt8] ) { //, progress: @escaping (Float) -> Void, completionHandler: @escaping (Error?) -> Void) {
-    //func downloadGame(gameImage: [UInt8]) { // share progress or error
-        // find the length of the game
-        let gameLength = gameImage.count
-        
-        // compute the checksum
-        let checksum = gameImage.reduce(0x0000) {(sum,current)->UInt16 in
-            return (sum + UInt16(current)) & 0xFFFF
-        }
-        print("game length:\(gameLength) checksum: \(checksum)")
-        
-        
-        let headerBlock = [UInt8(gameLength&0xFF), UInt8(gameLength/0x100), UInt8(checksum&0xFF), UInt8(checksum/0x100)]
-        // send header block
-        sendBlock(block: headerBlock)
-        
-        var bytesLeft = gameLength
-        
-        while(bytesLeft > 0) {
-            
-            //progress(Float(gameLength - bytesLeft) / Float(gameLength))
-            
-            let blockSize = min(bytesLeft,256)
-            
-            // send block
-            
-            let remainingBytes = gameImage[(gameLength - bytesLeft)...]
-            let blockBytes = remainingBytes[..<blockSize]   // TODO: figure out how to get just the blockBytes
-            
-            print("block size sent: \(blockBytes.count)")
-            // slice of the game (256 bytes max)
-            
-            // sendBlock the length of blockSize
-            sendBlock(block: gameImage) // blockBytes
-            // length of blockSize
-
-            bytesLeft -= blockSize
-        }
-        
-        // Success!!! Game Loaded
-//        completionHandler(nil)
-    }
-    
-    /*
-     Send a block of the game
-     */
-    func sendBlock(block: [UInt8]) {
-        // wait for the slot to be available (using a customCommand)
-//        iso15693Tag.customCommandCode: 0xA0, customRequestParameters: Data(bytes: [0x00])){ (response: Data, error: Error?) in
-//        }
-        //            print("inside the response")
-        // send block (using a customCommand)
-//        iso15693Tag.customCommandCode: 0xA0, customRequestParameters: Data(bytes: [0x00])){ (response: Data, error: Error?) in
-//        }
-    }
     
 }
 
